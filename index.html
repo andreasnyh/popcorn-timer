@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Popcorn timer</title>
+<style>
+  /* Dark, because the screen stays on for the whole bag. */
+  :root { color-scheme: dark; }
+  body { margin: 0; font: 18px/1.4 system-ui, sans-serif; background: #1c1917; color: #d6d3d1; }
+  main { max-width: 480px; margin: 0 auto; padding: 24px 16px; display: flex; flex-direction: column; gap: 24px; }
+  h1 { margin: 0; font-size: 24px; }
+  p { margin: 0; }
+  dl { margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  dl div { padding: 16px; background: #292524; border: 1px solid #44403c; border-radius: 8px; }
+  dt { font-size: 16px; }
+  dd { margin: 0; font-size: 48px; font-variant-numeric: tabular-nums; }
+  #toggle { padding: 20px; font: inherit; font-size: 24px; border: 0; border-radius: 8px; background: #b45309; color: #fff; }
+  #toggle:disabled { opacity: 0.6; }
+  #alarm { position: fixed; inset: 0; width: 100%; border: 0; font: inherit; font-size: 40px; background: #b45309; color: #fff; animation: flash 0.5s steps(1) infinite; }
+  #alarm[hidden] { display: none; }
+  #alarm span { display: block; font-size: 20px; }
+  @keyframes flash { 50% { background: #1c1917; } }
+  @media (prefers-reduced-motion: reduce) { #alarm { animation: none; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Popcorn timer</h1>
+  <p>Start the microwave, then press Start and keep this page open beside it.</p>
+  <dl>
+    <div><dt>Pops</dt><dd id="count">0</dd></div>
+    <div><dt>Since last pop</dt><dd id="gap">–</dd></div>
+  </dl>
+  <button id="toggle">Start</button>
+  <p id="message" role="status"></p>
+</main>
+<button id="alarm" hidden>Stop the microwave<span id="reason"></span><span>Tap to silence</span></button>
+<script type="module">
+  import { alarmAt, BACKUP_AT } from './popcorn.js';
+
+  const $ = (id) => document.getElementById(id);
+  let ctx, stream, source, node, wakeLock, timer, beeping, beeper;
+  let pops, audioStart, wallStart;
+
+  $('toggle').onclick = () => (stream ? stopListening() : start());
+  $('alarm').onclick = silence;
+  document.addEventListener('visibilitychange', () => stream && document.visibilityState === 'visible' && keepAwake());
+
+  async function start() {
+    $('toggle').disabled = true;
+    $('message').textContent = '';
+    try {
+      // Created and resumed inside the tap, or iOS keeps it silent for the alarm later.
+      if (!ctx) {
+        ctx = new AudioContext();
+        ctx.resume();
+        await ctx.audioWorklet.addModule('worklet.js');
+      } else ctx.resume();
+      if (navigator.audioSession) navigator.audioSession.type = 'auto';
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      });
+    } catch (e) {
+      $('message').textContent = `Can't listen: ${e.message}`;
+      return;
+    } finally {
+      $('toggle').disabled = false;
+    }
+
+    pops = [];
+    audioStart = ctx.currentTime;
+    wallStart = performance.now();
+    source = ctx.createMediaStreamSource(stream);
+    node = new AudioWorkletNode(ctx, 'pops');
+    node.port.onmessage = ({ data }) => pops.push(data - audioStart);
+    // The worklet outputs silence; the connection keeps it running.
+    source.connect(node).connect(ctx.destination);
+    timer = setInterval(tick, 100);
+    $('toggle').textContent = 'End';
+    keepAwake();
+  }
+
+  async function keepAwake() {
+    wakeLock = await navigator.wakeLock?.request('screen').catch(() => null);
+    if (!wakeLock) $('message').textContent = "Can't keep the screen on. Keep it awake yourself, or the mic stops.";
+  }
+
+  function tick() {
+    const now = ctx.currentTime - audioStart;
+    $('count').textContent = pops.length;
+    $('gap').textContent = pops.length ? `${(now - pops.at(-1)).toFixed(1)} s` : '–';
+    // The wall clock backs up the audio clock, which stops if iOS suspends the audio.
+    const wall = (performance.now() - wallStart) / 1000;
+    if (wall >= BACKUP_AT) alarm('4:00 is up');
+    else if (now >= alarmAt(pops)) alarm(now >= BACKUP_AT ? '4:00 is up' : 'Popping has slowed');
+  }
+
+  function stopListening() {
+    clearInterval(timer);
+    stream.getTracks().forEach((track) => track.stop());
+    source.disconnect();
+    node.disconnect();
+    stream = null;
+    wakeLock?.release();
+    $('toggle').textContent = 'Start';
+  }
+
+  // ADR 0003: the mic goes off first, so iOS gives the alarm full volume on the loudspeaker.
+  function alarm(reason) {
+    stopListening();
+    if (navigator.audioSession) navigator.audioSession.type = 'playback';
+    ctx.resume();
+    const gain = new GainNode(ctx, { gain: 0 });
+    beeper = new OscillatorNode(ctx, { type: 'square', frequency: 2000 });
+    beeper.connect(gain).connect(ctx.destination);
+    beeper.start();
+    beeping = setInterval(() => {
+      gain.gain.value = gain.gain.value ? 0 : 1;
+      if (gain.gain.value) navigator.vibrate?.(250);
+    }, 250);
+    $('reason').textContent = reason;
+    $('alarm').hidden = false;
+    $('alarm').focus();
+  }
+
+  function silence() {
+    clearInterval(beeping);
+    beeper.stop();
+    navigator.vibrate?.(0);
+    $('alarm').hidden = true;
+  }
+</script>
+</body>
+</html>
