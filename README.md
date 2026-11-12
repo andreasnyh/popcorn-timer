@@ -33,3 +33,7 @@ Clips are kept local in `recordings/` and never committed, so attribution isn't 
 | https://freesound.org/people/morgantj/sounds/58850/ | 2:01 | CC BY |
 
 Dropped, because the microwave goes off while popping is still at 70% or more of its peak, so there is no tail: 495928, 334488, 702602.
+
+## License
+
+MIT, see `LICENSE`. The Freesound clips in `recordings/` are not part of the repo and keep their own licences.
